@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>مهامي · ثابوت</title>
+  <style>
+    :root {
+      --bg: #f2f6f3;
+      --ink: #173d30;
+      --muted: #587064;
+      --line: #ccdbd1;
+      --card: #ffffff;
+      --accent: #176955;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "SF Pro Text", "Segoe UI", "Tahoma", sans-serif;
+      background: linear-gradient(180deg, #e7f1eb 0%, var(--bg) 40%, #eef5f0 100%);
+      color: var(--ink);
+      min-height: 100vh;
+    }
+    .phone {
+      width: 390px;
+      min-height: 844px;
+      margin: 24px auto;
+      background: var(--bg);
+      border: 1px solid #b7c9be;
+      border-radius: 36px;
+      box-shadow: 0 18px 50px rgba(18, 62, 48, 0.12);
+      padding: 28px 22px 48px;
+    }
+    .eyebrow { color: var(--muted); font-size: 13px; margin: 0 0 6px; }
+    .brand { font-size: 44px; font-weight: 800; margin: 0; }
+    .subtitle { color: var(--accent); font-size: 18px; margin: 6px 0 18px; }
+    .card {
+      background: var(--card);
+      border: 1px solid #dae5de;
+      border-radius: 18px;
+      padding: 20px;
+      margin-bottom: 16px;
+    }
+    h2 { font-size: 20px; margin: 0 0 10px; }
+    .muted { color: var(--muted); font-size: 13px; line-height: 1.7; }
+    .task { border-top: 1px solid #dae5de; margin-top: 10px; padding-top: 10px; }
+    .task h3 { margin: 0 0 8px; font-size: 18px; }
+    .ref { color: var(--accent); font-weight: 700; font-size: 15px; }
+    .note {
+      margin-top: 18px;
+      font-size: 12px;
+      color: #7a3b12;
+      background: #fff7ec;
+      border-radius: 12px;
+      padding: 12px;
+      line-height: 1.6;
+    }
+  </style>
+</head>
+<body>
+  <div class="phone" id="my-tasks-screen">
+    <p class="eyebrow">نهر الجزيرة والشركات التابعة لها</p>
+    <h1 class="brand">ثابوت</h1>
+    <p class="subtitle">الموظف الذكي رقم ٣</p>
+    <section class="card" aria-label="مهامي">
+      <h2>مهامي</h2>
+      <p class="muted">سارة · خبزي الخالي</p>
+      <div class="task">
+        <h3>إعداد جدول إنتاج الأسبوع</h3>
+        <p>الموعد: 19 / 11 / 2026</p>
+        <p class="ref">مرجع القرار: M-001 / D-01</p>
+      </div>
+    </section>
+    <p class="note">معاينة بصرية مطابقة لمحتوى شاشة «مهامي» المحلية. ليست لقطة محاكي آيفون؛ بيئة السحابة الحالية Linux بلا Xcode/Simulator.</p>
+  </div>
+</body>
+</html>

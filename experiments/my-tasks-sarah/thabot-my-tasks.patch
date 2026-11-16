@@ -1,0 +1,957 @@
+diff --git a/.gitignore b/.gitignore
+index c9caaad..0e5d2b8 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -152,3 +152,6 @@ backups/
+ # -----------------------------
+ apps/ai-studio/
+ services/odoo/
++
++# Local experiment runtime
++work/
+diff --git a/api/app/core/my_tasks.py b/api/app/core/my_tasks.py
+new file mode 100644
+index 0000000..449c358
+--- /dev/null
++++ b/api/app/core/my_tasks.py
+@@ -0,0 +1,138 @@
++"""Local demo «مهامي» directory — session-scoped, not Odoo-backed yet.
++
++Employee identity and company come only from the verified chat session.
++Assignee filtering uses the fixed demo employee id mapped from that session.
++"""
++from __future__ import annotations
++
++from dataclasses import dataclass
++from typing import Mapping
++
++from fastapi import HTTPException
++
++from app.core.identity import ChatIdentity
++
++# Fixed demo employee for سارة (خبزي الخالي). Display name is presentation-only.
++SARAH_EMPLOYEE_ID = "emp_sarah_khubzi_001"
++SARAH_DISPLAY_NAME = "سارة"
++SARAH_USER_ID = "sarah_khubzi"
++KHUBZI_COMPANY_ID = "khubzi"
++KHUBZI_COMPANY_LABEL = "خبزي الخالي"
++
++# Second same-company employee with ordinary employee role (no elevated access).
++OMAR_EMPLOYEE_ID = "emp_omar_khubzi_002"
++OMAR_DISPLAY_NAME = "عمر"
++OMAR_USER_ID = "omar_khubzi"
++
++# Isolation peer: مصنع سعودي جلوتين فري / جي إف (register code ``gf``).
++GF_COMPANY_ID = "gf"
++GF_COMPANY_LABEL = "مصنع سعودي جلوتين فري"
++GF_EMPLOYEE_ID = "emp_nouf_gf_001"
++GF_DISPLAY_NAME = "نوف"
++GF_USER_ID = "nouf_gf"
++
++SARAH_TASK_ID = "task_m001"
++SARAH_TASK_TITLE = "إعداد جدول إنتاج الأسبوع"
++SARAH_TASK_DUE = "2026-11-19"
++SARAH_TASK_REF = "M-001 / D-01"
++
++
++@dataclass(frozen=True)
++class DemoEmployee:
++    employee_id: str
++    display_name: str
++    user_id: str
++    company_id: str
++    company_label: str
++    role: str = "employee"
++
++
++@dataclass(frozen=True)
++class DemoTask:
++    task_id: str
++    title: str
++    due_date: str
++    decision_ref: str
++    assignee_employee_id: str
++    company_id: str
++
++
++_EMPLOYEES: Mapping[tuple[str, str], DemoEmployee] = {
++    (KHUBZI_COMPANY_ID, SARAH_USER_ID): DemoEmployee(
++        SARAH_EMPLOYEE_ID, SARAH_DISPLAY_NAME, SARAH_USER_ID, KHUBZI_COMPANY_ID, KHUBZI_COMPANY_LABEL,
++    ),
++    (KHUBZI_COMPANY_ID, OMAR_USER_ID): DemoEmployee(
++        OMAR_EMPLOYEE_ID, OMAR_DISPLAY_NAME, OMAR_USER_ID, KHUBZI_COMPANY_ID, KHUBZI_COMPANY_LABEL,
++    ),
++    (GF_COMPANY_ID, GF_USER_ID): DemoEmployee(
++        GF_EMPLOYEE_ID, GF_DISPLAY_NAME, GF_USER_ID, GF_COMPANY_ID, GF_COMPANY_LABEL,
++    ),
++}
++
++_TASKS: tuple[DemoTask, ...] = (
++    DemoTask(
++        SARAH_TASK_ID,
++        SARAH_TASK_TITLE,
++        SARAH_TASK_DUE,
++        SARAH_TASK_REF,
++        SARAH_EMPLOYEE_ID,
++        KHUBZI_COMPANY_ID,
++    ),
++)
++
++
++def resolve_demo_employee(identity: ChatIdentity) -> DemoEmployee:
++    """Map the verified session to a fixed demo employee; never trust client body fields."""
++    if identity.role not in {"employee", "board", "admin"}:
++        raise HTTPException(403, "workforce_access_required")
++    employee = _EMPLOYEES.get((identity.company_id, identity.user_id))
++    if employee is None or employee.company_id != identity.company_id:
++        raise HTTPException(403, "employee_directory_miss")
++    return employee
++
++
++def _serialize(task: DemoTask, employee: DemoEmployee) -> dict:
++    return {
++        "task_id": task.task_id,
++        "title": task.title,
++        "due_date": task.due_date,
++        "decision_ref": task.decision_ref,
++        "assignee": {
++            "employee_id": employee.employee_id,
++            "display_name": employee.display_name,
++        },
++        "company": {
++            "company_id": employee.company_id,
++            "label": employee.company_label,
++        },
++    }
++
++
++def list_my_tasks(identity: ChatIdentity) -> dict:
++    employee = resolve_demo_employee(identity)
++    items = [
++        _serialize(task, employee)
++        for task in _TASKS
++        if task.company_id == employee.company_id and task.assignee_employee_id == employee.employee_id
++    ]
++    return {
++        "employee": {
++            "employee_id": employee.employee_id,
++            "display_name": employee.display_name,
++            "company_id": employee.company_id,
++            "company_label": employee.company_label,
++        },
++        "tasks": items,
++    }
++
++
++def get_my_task(identity: ChatIdentity, task_id: str) -> dict:
++    employee = resolve_demo_employee(identity)
++    for task in _TASKS:
++        if task.task_id != task_id:
++            continue
++        if task.company_id != employee.company_id or task.assignee_employee_id != employee.employee_id:
++            # Same-company peers and other tenants must not learn that the task exists.
++            raise HTTPException(404, "task_not_found")
++        return _serialize(task, employee)
++    raise HTTPException(404, "task_not_found")
+diff --git a/api/app/mobile.py b/api/app/mobile.py
+index 27733ab..d4a399b 100644
+--- a/api/app/mobile.py
++++ b/api/app/mobile.py
+@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
+ from starlette.concurrency import run_in_threadpool
+ from starlette.exceptions import HTTPException as StarletteHTTPException
+ 
++from app.core.my_tasks import get_my_task, list_my_tasks
+ from app.core.policy_gate import enforce
+ from app.core.public_assistant import (
+     AssistantUnavailable, MAX_INPUT_CHARS, PilotRateLimiter,
+@@ -180,10 +181,26 @@ def bootstrap(request: Request):
+             "meeting_recording": "not_connected",
+             "prayer_notifications": "not_configured",
+             "storage": "not_provisioned",
++            "my_tasks": "local_demo_directory",
+         },
+     })
+ 
+ 
++@router.get("/tasks")
++def my_tasks(request: Request):
++    """Return tasks assigned to the employee bound to the authenticated session."""
++    identity = _identity(request)
++    request.state.audit_context["decision_flag"] = "mobile_my_tasks_list"
++    return _response(request, list_my_tasks(identity))
++
++
++@router.get("/tasks/{task_id}")
++def my_task_detail(task_id: str, request: Request):
++    identity = _identity(request)
++    request.state.audit_context["decision_flag"] = "mobile_my_tasks_read"
++    return _response(request, get_my_task(identity, task_id))
++
++
+ @router.post("/assistant")
+ def public_assistant(input: PublicChatInput, request: Request):
+     identity = _identity(request)
+diff --git a/api/tests/test_my_tasks.py b/api/tests/test_my_tasks.py
+new file mode 100644
+index 0000000..45f0395
+--- /dev/null
++++ b/api/tests/test_my_tasks.py
+@@ -0,0 +1,117 @@
++"""«مهامي» local demo — four baseline cases plus same-company peer isolation."""
++from __future__ import annotations
++
++from types import SimpleNamespace
++
++import pytest
++from fastapi import FastAPI, HTTPException
++
++from app import mobile
++from app.core import my_tasks as my_tasks_mod
++from app.core.public_assistant import PilotRateLimiter
++from tests.test_mobile_http import invoke
++
++
++@pytest.fixture
++def api(monkeypatch):
++    monkeypatch.setenv("APP_ENV", "development")
++    monkeypatch.delenv("THABOT_PUBLIC_CHAT_ENABLED", raising=False)
++    monkeypatch.setattr(mobile, "limiter", PilotRateLimiter())
++
++    def identity(request):
++        token = request.headers.get("authorization", "")
++        directory = {
++            "Bearer fixture_sarah_khubzi": SimpleNamespace(
++                user_id=my_tasks_mod.SARAH_USER_ID, role="employee", company_id=my_tasks_mod.KHUBZI_COMPANY_ID,
++            ),
++            "Bearer fixture_omar_khubzi": SimpleNamespace(
++                user_id=my_tasks_mod.OMAR_USER_ID, role="employee", company_id=my_tasks_mod.KHUBZI_COMPANY_ID,
++            ),
++            "Bearer fixture_nouf_gf": SimpleNamespace(
++                user_id=my_tasks_mod.GF_USER_ID, role="employee", company_id=my_tasks_mod.GF_COMPANY_ID,
++            ),
++            "Bearer fixture_board_a": SimpleNamespace(
++                user_id="fixture_user", role="board", company_id="company_a",
++            ),
++        }
++        if token in directory:
++            return directory[token]
++        raise HTTPException(401, "invalid_token")
++
++    monkeypatch.setattr(mobile, "_resolve", identity)
++    app = FastAPI()
++    app.include_router(mobile.router)
++    return app
++
++
++def auth(who: str) -> dict:
++    return {"authorization": f"Bearer fixture_{who}", "x-role": "admin", "x-company-id": "forged"}
++
++
++# --- Four baseline experiment tests -------------------------------------------------
++
++def test_1_sarah_sees_production_schedule_task(api):
++    result = invoke(api, "/v1/mobile/tasks", headers=auth("sarah_khubzi"))
++    assert result.status == 200
++    assert result.headers["cache-control"] == "no-store"
++    assert result.state["company_id"] == my_tasks_mod.KHUBZI_COMPANY_ID
++    body = result.body
++    assert body["employee"]["employee_id"] == my_tasks_mod.SARAH_EMPLOYEE_ID
++    assert body["employee"]["display_name"] == "سارة"
++    assert body["employee"]["company_label"] == "خبزي الخالي"
++    assert len(body["tasks"]) == 1
++    task = body["tasks"][0]
++    assert task["title"] == "إعداد جدول إنتاج الأسبوع"
++    assert task["due_date"] == "2026-11-19"
++    assert task["decision_ref"] == "M-001 / D-01"
++    assert task["assignee"]["employee_id"] == my_tasks_mod.SARAH_EMPLOYEE_ID
++    # Client-forged company/role headers must not change session binding.
++    assert task["company"]["company_id"] == my_tasks_mod.KHUBZI_COMPANY_ID
++
++
++def test_2_tasks_require_authentication(api):
++    result = invoke(api, "/v1/mobile/tasks", headers={"x-role": "admin", "x-company-id": my_tasks_mod.KHUBZI_COMPANY_ID})
++    assert result.status == 401
++    assert result.body["detail"] == "authentication_required"
++    assert result.state["audit_context"]["user_id"] == "anonymous"
++
++
++def test_3_saudi_gf_employee_isolated_from_sarah_tasks(api):
++    listed = invoke(api, "/v1/mobile/tasks", headers=auth("nouf_gf"))
++    assert listed.status == 200
++    assert listed.state["company_id"] == my_tasks_mod.GF_COMPANY_ID
++    assert listed.body["employee"]["company_label"] == "مصنع سعودي جلوتين فري"
++    assert listed.body["tasks"] == []
++    detail = invoke(api, f"/v1/mobile/tasks/{my_tasks_mod.SARAH_TASK_ID}", headers=auth("nouf_gf"))
++    assert detail.status == 404
++    assert detail.body == {"detail": "task_not_found"}
++
++
++def test_4_sarah_can_open_task_by_decision_id(api):
++    result = invoke(api, f"/v1/mobile/tasks/{my_tasks_mod.SARAH_TASK_ID}", headers=auth("sarah_khubzi"))
++    assert result.status == 200
++    assert result.body["title"] == "إعداد جدول إنتاج الأسبوع"
++    assert result.body["due_date"] == "2026-11-19"
++    assert result.body["decision_ref"] == "M-001 / D-01"
++    assert result.body["assignee"]["display_name"] == "سارة"
++
++
++# --- Added: same-company peer with ordinary employee permissions --------------------
++
++def test_5_second_khubzi_employee_cannot_list_or_open_sarah_task(api):
++    listed = invoke(api, "/v1/mobile/tasks", headers=auth("omar_khubzi"))
++    assert listed.status == 200
++    assert listed.body["employee"]["employee_id"] == my_tasks_mod.OMAR_EMPLOYEE_ID
++    assert listed.body["employee"]["display_name"] == "عمر"
++    assert listed.body["employee"]["company_id"] == my_tasks_mod.KHUBZI_COMPANY_ID
++    assert listed.body["tasks"] == []
++    assert all(task.get("task_id") != my_tasks_mod.SARAH_TASK_ID for task in listed.body["tasks"])
++    detail = invoke(api, f"/v1/mobile/tasks/{my_tasks_mod.SARAH_TASK_ID}", headers=auth("omar_khubzi"))
++    assert detail.status == 404
++    assert detail.body == {"detail": "task_not_found"}
++
++
++def test_bootstrap_advertises_local_my_tasks_capability(api):
++    result = invoke(api, headers=auth("sarah_khubzi"))
++    assert result.status == 200
++    assert result.body["capabilities"]["my_tasks"] == "local_demo_directory"
+diff --git a/apps/mobile-board/LocalTestApp.tsx b/apps/mobile-board/LocalTestApp.tsx
+new file mode 100644
+index 0000000..6020f20
+--- /dev/null
++++ b/apps/mobile-board/LocalTestApp.tsx
+@@ -0,0 +1,20 @@
++/**
++ * Local-only harness for the «مهامي» experiment.
++ * Not the production entry. Requires a short-lived token minted by
++ * scripts/mint_local_mobile_session.py and a loopback API origin.
++ */
++import { ThabotApp } from "./App";
++import type { Session } from "./api";
++
++const origin = (process.env.EXPO_PUBLIC_THABOT_API_ORIGIN || "http://127.0.0.1:8001").trim();
++const token = (process.env.EXPO_PUBLIC_THABOT_LOCAL_ACCESS_TOKEN || "").trim();
++const expiresAt = Number(process.env.EXPO_PUBLIC_THABOT_LOCAL_EXPIRES_AT || "0");
++
++const session: Session | null =
++  token && Number.isFinite(expiresAt) && expiresAt > Date.now()
++    ? { accessToken: token, expiresAt }
++    : null;
++
++export default function LocalTestApp() {
++  return <ThabotApp session={session} apiOrigin={origin} onSignOut={() => {}} />;
++}
+diff --git a/apps/mobile-board/MyTasks.tsx b/apps/mobile-board/MyTasks.tsx
+new file mode 100644
+index 0000000..94de0f3
+--- /dev/null
++++ b/apps/mobile-board/MyTasks.tsx
+@@ -0,0 +1,55 @@
++import React from "react";
++import { StyleSheet, Text, View } from "react-native";
++import type { MyTask, MyTasksPayload } from "./api";
++import { styles as shared } from "./Workspace";
++
++function formatDueDate(iso: string): string {
++  // Keep the server date authoritative; present it in Arabic-friendly digits only.
++  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
++  if (!match) return iso;
++  const [, year, month, day] = match;
++  return `${day} / ${month} / ${year}`;
++}
++
++export function MyTasksPanel({ payload }: { payload: MyTasksPayload }) {
++  return (
++    <View style={shared.card} testID="my-tasks-panel">
++      <Text accessibilityRole="header" style={shared.heading}>مهامي</Text>
++      <Text style={shared.muted}>
++        {payload.employee.display_name} · {payload.employee.company_label}
++      </Text>
++      {payload.tasks.length === 0 ? (
++        <Text style={shared.text}>لا توجد مهام مسندة إلى حسابك حالياً.</Text>
++      ) : payload.tasks.map((task: MyTask) => (
++        <View key={task.task_id} style={styles.task} testID={`task-${task.task_id}`}>
++          <Text accessibilityRole="header" style={styles.taskTitle}>{task.title}</Text>
++          <Text style={shared.text}>الموعد: {formatDueDate(task.due_date)}</Text>
++          <Text style={styles.ref}>مرجع القرار: {task.decision_ref}</Text>
++        </View>
++      ))}
++    </View>
++  );
++}
++
++const styles = StyleSheet.create({
++  task: {
++    gap: 8,
++    paddingTop: 8,
++    borderTopWidth: 1,
++    borderTopColor: "#dae5de",
++  },
++  taskTitle: {
++    fontSize: 18,
++    fontWeight: "700",
++    color: "#173d30",
++    textAlign: "right",
++    writingDirection: "rtl",
++  },
++  ref: {
++    fontSize: 15,
++    color: "#176955",
++    fontWeight: "600",
++    textAlign: "right",
++    writingDirection: "rtl",
++  },
++});
+diff --git a/apps/mobile-board/Workspace.tsx b/apps/mobile-board/Workspace.tsx
+index 786f00e..e51d28a 100644
+--- a/apps/mobile-board/Workspace.tsx
++++ b/apps/mobile-board/Workspace.tsx
+@@ -1,24 +1,41 @@
+ import React, { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
+ import { ActivityIndicator, Pressable, StyleSheet, Switch, Text, TextInput, View } from "react-native";
+ import { arabicError, createThabotAPI, SessionScope, ThabotAPIError } from "./api";
+-import type { Bootstrap, Session } from "./api";
++import type { Bootstrap, MyTasksPayload, Session } from "./api";
++import { MyTasksPanel } from "./MyTasks";
+ 
+ const roles = { admin: "إدارة المنصة", board: "مجلس الإدارة", employee: "الموظفون" };
+ const names: Record<string, string> = {
+   public_assistant: "المساعد العام", operations_summary: "ملخص أودو", calendar: "تقويم الشركة",
+   voice: "المحادثة الصوتية", cameras: "الكاميرات", meeting_recording: "تسجيل الاجتماعات",
+-  prayer_notifications: "تنبيهات الصلاة", storage: "التخزين المؤسسي",
++  prayer_notifications: "تنبيهات الصلاة", storage: "التخزين المؤسسي", my_tasks: "مهامي",
+ };
+ const states: Record<string, string> = {
+   disabled_in_production: "التجربة غير متاحة في الإنتاج",
+   disabled: "غير مفعّل", not_configured: "بانتظار الإعداد", configured_not_verified: "مهيأ · لم يُتحقق من الاتصال",
+   requires_live_odoo_verification: "بانتظار اختبار أودو", forbidden: "خارج صلاحيات الحساب",
+-  not_connected: "غير متصل", not_provisioned: "غير مجهّز",
++  not_connected: "غير متصل", not_provisioned: "غير مجهّز", local_demo_directory: "دليل تجريبي محلي",
+ };
+ 
++function isLoopbackOrigin(origin: string): boolean {
++  try {
++    const url = new URL(origin);
++    return url.hostname === "127.0.0.1" || url.hostname === "localhost";
++  } catch {
++    return false;
++  }
++}
++
+ export function Workspace({ origin, session, onSignOut }: { origin: string; session: Session; onSignOut: () => void }) {
+-  const api = useMemo(() => { try { return createThabotAPI(origin); } catch { return null; } }, [origin]);
++  const api = useMemo(() => {
++    try {
++      return createThabotAPI(origin, fetch, { allowLocalHttp: isLoopbackOrigin(origin) });
++    } catch {
++      return null;
++    }
++  }, [origin]);
+   const [loaded, setLoaded] = useState<{ data: Bootstrap; scope: SessionScope } | null>(null);
++  const [myTasks, setMyTasks] = useState<MyTasksPayload | null>(null);
+   // Hide the previous identity synchronously, before effects run after a switch.
+   const workspace = loaded?.scope.matches(session, origin) ? loaded.data : null;
+   const [error, setError] = useState("");
+@@ -37,7 +54,7 @@ export function Workspace({ origin, session, onSignOut }: { origin: string; sess
+   const endSession = useCallback(() => {
+     scopeRef.current?.dispose();
+     setRetryScope(null);
+-    setLoaded(null); setQuestion(""); setReply(""); setConfirmed(false); setBusy(false);
++    setLoaded(null); setMyTasks(null); setQuestion(""); setReply(""); setConfirmed(false); setBusy(false);
+     signOutRef.current();
+   }, []);
+ 
+@@ -47,10 +64,24 @@ export function Workspace({ origin, session, onSignOut }: { origin: string; sess
+     const current = () => scopeRef.current === scope && scope.matches(session, origin);
+     sending.current = false;
+     setRetryScope(null);
+-    setLoaded(null); setError(""); setReply(""); setQuestion(""); setConfirmed(false); setBusy(false);
++    setLoaded(null); setMyTasks(null); setError(""); setReply(""); setQuestion(""); setConfirmed(false); setBusy(false);
+     if (!api) setError("عنوان خادم الشركة لم يُضبط بأمان.");
+-    else api.bootstrap(scope.session, scope.signal).then(data => {
+-      if (current()) setLoaded({ data, scope });
++    else api.bootstrap(scope.session, scope.signal).then(async data => {
++      if (!current()) return;
++      setLoaded({ data, scope });
++      if (data.capabilities.my_tasks === "local_demo_directory") {
++        try {
++          const tasks = await api.listMyTasks(scope.session, scope.signal);
++          if (current()) setMyTasks(tasks);
++        } catch (err) {
++          if (!current()) return;
++          // Directory miss for non-demo identities stays quiet; auth failures still end the session.
++          if (err instanceof ThabotAPIError && err.status === 401) endSession();
++          else if (err instanceof ThabotAPIError && err.code !== "employee_directory_miss") {
++            setError(arabicError(err));
++          }
++        }
++      }
+     }).catch(err => {
+       if (!current()) return;
+       setError(arabicError(err));
+@@ -107,6 +138,7 @@ export function Workspace({ origin, session, onSignOut }: { origin: string; sess
+     </Pressable> : null}
+     {!workspace && !error ? <ActivityIndicator accessibilityLabel="جارٍ التحقق من حسابك" color="#176955" /> : null}
+     {workspace ? <>
++      {myTasks ? <MyTasksPanel payload={myTasks} /> : null}
+       <View style={styles.card}>
+         <Text accessibilityRole="header" style={styles.heading}>{roles[workspace.identity.role]}</Text>
+         <Text style={styles.text}>الشركة الحالية: {workspace.identity.company_id}</Text>
+diff --git a/apps/mobile-board/__tests__/my-tasks.test.tsx b/apps/mobile-board/__tests__/my-tasks.test.tsx
+new file mode 100644
+index 0000000..0b88b8d
+--- /dev/null
++++ b/apps/mobile-board/__tests__/my-tasks.test.tsx
+@@ -0,0 +1,31 @@
++import React from "react";
++import { render, screen } from "@testing-library/react-native";
++import { MyTasksPanel } from "../MyTasks";
++
++test("renders Arabic مهامي task title due date and decision reference", () => {
++  render(
++    <MyTasksPanel
++      payload={{
++        employee: {
++          employee_id: "emp_sarah_khubzi_001",
++          display_name: "سارة",
++          company_id: "khubzi",
++          company_label: "خبزي الخالي",
++        },
++        tasks: [{
++          task_id: "task_m001",
++          title: "إعداد جدول إنتاج الأسبوع",
++          due_date: "2026-11-19",
++          decision_ref: "M-001 / D-01",
++          assignee: { employee_id: "emp_sarah_khubzi_001", display_name: "سارة" },
++          company: { company_id: "khubzi", label: "خبزي الخالي" },
++        }],
++      }}
++    />,
++  );
++  expect(screen.getByText("مهامي")).toBeTruthy();
++  expect(screen.getByText("إعداد جدول إنتاج الأسبوع")).toBeTruthy();
++  expect(screen.getByText("الموعد: 19 / 11 / 2026")).toBeTruthy();
++  expect(screen.getByText("مرجع القرار: M-001 / D-01")).toBeTruthy();
++  expect(screen.getByText(/سارة · خبزي الخالي/)).toBeTruthy();
++});
+diff --git a/apps/mobile-board/__tests__/session-lifecycle.test.tsx b/apps/mobile-board/__tests__/session-lifecycle.test.tsx
+index 63749a0..e92dbdb 100644
+--- a/apps/mobile-board/__tests__/session-lifecycle.test.tsx
++++ b/apps/mobile-board/__tests__/session-lifecycle.test.tsx
+@@ -3,7 +3,7 @@ import { AppState, AppStateStatus } from "react-native";
+ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react-native";
+ import { ThabotApp } from "../App";
+ import { createThabotAPI, ThabotAPIError } from "../api";
+-import type { AssistantReply, Bootstrap, Session } from "../api";
++import type { AssistantReply, Bootstrap, MyTasksPayload, Session } from "../api";
+ 
+ // Device insets require native layout. Use the library's official test double;
+ // these tests assert session behavior, not notch/rotation rendering on an iPhone.
+@@ -19,6 +19,7 @@ const origin = "https://fixture.invalid";
+ const listeners = new Set<(status: AppStateStatus) => void>();
+ const bootstrap = jest.fn<Promise<Bootstrap>, [Session, AbortSignal?]>();
+ const ask = jest.fn<Promise<AssistantReply>, [Session, string, boolean, AbortSignal?]>();
++const listMyTasks = jest.fn<Promise<MyTasksPayload>, [Session, AbortSignal?]>();
+ const signOut = jest.fn();
+ 
+ function session(name = "a"): Session {
+@@ -65,9 +66,13 @@ beforeEach(() => {
+   jest.useFakeTimers();
+   jest.setSystemTime(new Date("2026-10-02T00:00:00Z"));
+   jest.clearAllMocks();
+-  bootstrap.mockReset(); ask.mockReset(); listeners.clear();
++  bootstrap.mockReset(); ask.mockReset(); listMyTasks.mockReset(); listeners.clear();
+   bootstrap.mockImplementation(async current => data(current.accessToken.endsWith("_b") ? "company_b" : "company_a"));
+-  jest.mocked(createThabotAPI).mockReturnValue({ bootstrap, askPublicQuestion: ask });
++  listMyTasks.mockResolvedValue({
++    employee: { employee_id: "fixture_emp", display_name: "fixture", company_id: "company_a", company_label: "fixture" },
++    tasks: [],
++  });
++  jest.mocked(createThabotAPI).mockReturnValue({ bootstrap, askPublicQuestion: ask, listMyTasks });
+   Object.defineProperty(AppState, "currentState", { configurable: true, writable: true, value: "active" });
+   jest.spyOn(AppState, "addEventListener").mockImplementation((event, listener) => {
+     listeners.add(listener);
+diff --git a/apps/mobile-board/api.ts b/apps/mobile-board/api.ts
+index 405b35e..ed6f630 100644
+--- a/apps/mobile-board/api.ts
++++ b/apps/mobile-board/api.ts
+@@ -41,6 +41,23 @@ export type Bootstrap = {
+   };
+   capabilities: Record<string, string>;
+ };
++export type MyTask = {
++  task_id: string;
++  title: string;
++  due_date: string;
++  decision_ref: string;
++  assignee: { employee_id: string; display_name: string };
++  company: { company_id: string; label: string };
++};
++export type MyTasksPayload = {
++  employee: {
++    employee_id: string;
++    display_name: string;
++    company_id: string;
++    company_label: string;
++  };
++  tasks: MyTask[];
++};
+ export type AssistantReply = { reply: string; source: "openai"; scope: "public_text_only";
+   company_data_accessed: false; actions_executed: false; request_id: string };
+ 
+@@ -70,6 +87,8 @@ const ERROR_MESSAGES: Record<string, string> = {
+   invalid_server_url: "عنوان خادم الشركة لم يُضبط بأمان.",
+   request_cancelled: "أُلغي الطلب على هذا الجهاز.",
+   request_timed_out: "انتهت مهلة الاتصال. لم تُعَد المحاولة تلقائياً.",
++  task_not_found: "هذه المهمة غير متاحة لحسابك.",
++  employee_directory_miss: "تعذّر ربط الجلسة بموظف معروف في الدليل التجريبي.",
+ };
+ 
+ export function arabicError(error: unknown): string {
+@@ -82,11 +101,18 @@ function isObject(value: unknown): value is Record<string, unknown> {
+   return value !== null && typeof value === "object" && !Array.isArray(value);
+ }
+ 
+-export function createThabotAPI(origin: string, fetcher: typeof fetch = fetch) {
++export function createThabotAPI(
++  origin: string,
++  fetcher: typeof fetch = fetch,
++  options: { allowLocalHttp?: boolean } = {},
++) {
+   let base: URL;
+   try {
+     base = new URL(origin);
+-    if (base.protocol !== "https:" || base.username || base.password || base.search || base.hash || base.pathname !== "/") {
++    const loopback = base.hostname === "127.0.0.1" || base.hostname === "localhost";
++    const httpsOk = base.protocol === "https:";
++    const localHttpOk = options.allowLocalHttp === true && base.protocol === "http:" && loopback;
++    if ((!httpsOk && !localHttpOk) || base.username || base.password || base.search || base.hash || base.pathname !== "/") {
+       throw new Error("invalid origin");
+     }
+   } catch {
+@@ -127,7 +153,8 @@ export function createThabotAPI(origin: string, fetcher: typeof fetch = fetch) {
+       if (!response.ok) {
+         const detail = isObject(payload) && typeof payload.detail === "string" ? payload.detail : "";
+         const safeCode = ["public_text_required", "public_assistant_not_enabled", "invalid_mobile_request",
+-          "mobile_request_too_large", "mobile_request_incomplete", "mobile_request_timed_out"].includes(detail)
++          "mobile_request_too_large", "mobile_request_incomplete", "mobile_request_timed_out",
++          "task_not_found", "employee_directory_miss"].includes(detail)
+           ? detail : response.status === 403 ? "access_denied" : "service_unavailable";
+         throw new ThabotAPIError(safeCode, response.status);
+       }
+@@ -181,5 +208,25 @@ export function createThabotAPI(origin: string, fetcher: typeof fetch = fetch) {
+       }
+       return data as AssistantReply;
+     },
++    async listMyTasks(session: Session, signal?: AbortSignal): Promise<MyTasksPayload> {
++      const data = await call("/v1/mobile/tasks", session, undefined, signal);
++      if (!isObject(data) || !isObject(data.employee) || !Array.isArray(data.tasks)) {
++        throw new ThabotAPIError("invalid_server_response");
++      }
++      const { employee, tasks } = data;
++      if (typeof employee.employee_id !== "string" || !employee.employee_id ||
++          typeof employee.display_name !== "string" || !employee.display_name ||
++          typeof employee.company_id !== "string" || !employee.company_id ||
++          typeof employee.company_label !== "string" || !employee.company_label ||
++          tasks.some(item => !isObject(item) || typeof item.task_id !== "string" || typeof item.title !== "string" ||
++            typeof item.due_date !== "string" || typeof item.decision_ref !== "string" ||
++            !isObject(item.assignee) || typeof item.assignee.employee_id !== "string" ||
++            typeof item.assignee.display_name !== "string" ||
++            !isObject(item.company) || typeof item.company.company_id !== "string" ||
++            typeof item.company.label !== "string")) {
++        throw new ThabotAPIError("invalid_server_response");
++      }
++      return data as MyTasksPayload;
++    },
+   };
+ }
+diff --git a/apps/mobile-board/index.js b/apps/mobile-board/index.js
+index e5802d2..c208d4a 100644
+--- a/apps/mobile-board/index.js
++++ b/apps/mobile-board/index.js
+@@ -1,5 +1,6 @@
+ import { registerRootComponent } from "expo";
+ 
+ import App from "./App";
++import LocalTestApp from "./LocalTestApp";
+ 
+-registerRootComponent(App);
++registerRootComponent(process.env.EXPO_PUBLIC_THABOT_LOCAL_TEST === "1" ? LocalTestApp : App);
+diff --git a/apps/mobile-board/index.local.js b/apps/mobile-board/index.local.js
+new file mode 100644
+index 0000000..4f8c734
+--- /dev/null
++++ b/apps/mobile-board/index.local.js
+@@ -0,0 +1,4 @@
++import { registerRootComponent } from "expo";
++import LocalTestApp from "./LocalTestApp";
++
++registerRootComponent(LocalTestApp);
+diff --git a/apps/mobile-board/package.json b/apps/mobile-board/package.json
+index 862fc32..851803d 100644
+--- a/apps/mobile-board/package.json
++++ b/apps/mobile-board/package.json
+@@ -9,6 +9,7 @@
+     "android": "expo run:android",
+     "ios": "expo run:ios",
+     "web": "expo start --web",
++    "start:local-my-tasks": "EXPO_PUBLIC_THABOT_LOCAL_TEST=1 expo start --localhost --web",
+     "typecheck": "tsc --noEmit",
+     "test:contract": "node --experimental-strip-types --test api.test.mjs",
+     "test:components": "jest --runInBand",
+diff --git a/experiments/my-tasks-sarah/CURSOR-MERGE.md b/experiments/my-tasks-sarah/CURSOR-MERGE.md
+new file mode 100644
+index 0000000..fa3c286
+--- /dev/null
++++ b/experiments/my-tasks-sarah/CURSOR-MERGE.md
+@@ -0,0 +1,34 @@
++# تجربة «مهامي» — سارة / خبزي الخالي
++
++## ملفا التجربة (يفتحان في Cursor)
++
++1. `experiments/my-tasks-sarah/CURSOR-MERGE.md` — هذا الملف
++2. `experiments/my-tasks-sarah/thabot-my-tasks.patch` — الرقعة الناجحة
++
++معاينة عربية للمحتوى: `experiments/my-tasks-sarah/preview-my-tasks.html`
++
++## أمر واحد جاهز للصق في Cursor
++
++يفترض أن المستودع `Aljazeerah-River/thabot-core` موجود محلياً، وأن ملف الرقعة بجانب هذا الملف:
++
++```bash
++cd "$HOME/src/thabot-core" && git fetch origin dev && git checkout -B cursor/my-tasks-sarah-local origin/dev && git apply experiments/my-tasks-sarah/thabot-my-tasks.patch && export PATH="$HOME/.local/bin:$PATH" && python3 -m pip install -q -r api/requirements-dev.txt && python3 -m pytest -q api/tests/test_my_tasks.py && python3 scripts/mint_local_mobile_session.py --who sarah --minutes 120 --write-env work/local-mobile.env >/tmp/thabot-local-session.json && (bash scripts/run_local_my_tasks_api.sh &) && sleep 3 && cd apps/mobile-board && export $(grep -v '^#' ../../work/local-mobile.env | xargs) && export EXPO_PUBLIC_THABOT_LOCAL_TEST=1 EXPO_PUBLIC_THABOT_API_ORIGIN=http://127.0.0.1:8001 && pnpm install --frozen-lockfile && pnpm run ios
++```
++
++عدّل `cd "$HOME/src/thabot-core"` إلى مسار نسختك. التطبيق المشترك المستهدف هو `apps/mobile-board`.
++
++## السلوك
++
++- الهوية والشركة من الجلسة الموثّقة فقط؛ لا يُقبل معرّف موظف من العميل.
++- سارة: `emp_sarah_khubzi_001`، العرض «سارة»، المهمة «إعداد جدول إنتاج الأسبوع»، الموعد `2026-11-19`، المرجع `M-001 / D-01`.
++- الاختبارات الأربعة + عزل عمر (خبزي الخالي) + عزل نوف (`gf` / مصنع سعودي جلوتين فري).
++
++## تحقق بيئة Linux السحابية (هذا الوكيل)
++
++- **على الخادم:** نجح — قائمة/تفاصيل سارة، عمر 404، اختبارات `test_my_tasks.py`، وعقد/مكوّنات الموبايل.
++- **داخل محاكي آيفون:** لم يُشغَّل — العائق: المضيف Linux بلا Xcode/Simulator.
++- **أمر التشغيل التالي على Mac:** الأمر أعلاه حتى `pnpm run ios`.
++
++## أقصر خطوة متبقية على آيفون حقيقي بحساب شركة تجريبي
++
++شغّل الأمر أعلاه على Mac مع الجهاز موصولاً (`pnpm run ios -- --device` إن لزم) وافتح «مهامي» بجلسة سارة المحلية — بلا نشر ولا تغيير صلاحيات ولا ربط Odoo في هذه المرحلة.
+diff --git a/experiments/my-tasks-sarah/my-tasks-sarah-arabic-preview.png b/experiments/my-tasks-sarah/my-tasks-sarah-arabic-preview.png
+new file mode 100644
+index 0000000..9301770
+Binary files /dev/null and b/experiments/my-tasks-sarah/my-tasks-sarah-arabic-preview.png differ
+diff --git a/experiments/my-tasks-sarah/preview-my-tasks.html b/experiments/my-tasks-sarah/preview-my-tasks.html
+new file mode 100644
+index 0000000..8845900
+--- /dev/null
++++ b/experiments/my-tasks-sarah/preview-my-tasks.html
+@@ -0,0 +1,77 @@
++<!doctype html>
++<html lang="ar" dir="rtl">
++<head>
++  <meta charset="utf-8" />
++  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
++  <title>مهامي · ثابوت</title>
++  <style>
++    :root {
++      --bg: #f2f6f3;
++      --ink: #173d30;
++      --muted: #587064;
++      --line: #ccdbd1;
++      --card: #ffffff;
++      --accent: #176955;
++    }
++    * { box-sizing: border-box; }
++    body {
++      margin: 0;
++      font-family: "SF Pro Text", "Segoe UI", "Tahoma", sans-serif;
++      background: linear-gradient(180deg, #e7f1eb 0%, var(--bg) 40%, #eef5f0 100%);
++      color: var(--ink);
++      min-height: 100vh;
++    }
++    .phone {
++      width: 390px;
++      min-height: 844px;
++      margin: 24px auto;
++      background: var(--bg);
++      border: 1px solid #b7c9be;
++      border-radius: 36px;
++      box-shadow: 0 18px 50px rgba(18, 62, 48, 0.12);
++      padding: 28px 22px 48px;
++    }
++    .eyebrow { color: var(--muted); font-size: 13px; margin: 0 0 6px; }
++    .brand { font-size: 44px; font-weight: 800; margin: 0; }
++    .subtitle { color: var(--accent); font-size: 18px; margin: 6px 0 18px; }
++    .card {
++      background: var(--card);
++      border: 1px solid #dae5de;
++      border-radius: 18px;
++      padding: 20px;
++      margin-bottom: 16px;
++    }
++    h2 { font-size: 20px; margin: 0 0 10px; }
++    .muted { color: var(--muted); font-size: 13px; line-height: 1.7; }
++    .task { border-top: 1px solid #dae5de; margin-top: 10px; padding-top: 10px; }
++    .task h3 { margin: 0 0 8px; font-size: 18px; }
++    .ref { color: var(--accent); font-weight: 700; font-size: 15px; }
++    .note {
++      margin-top: 18px;
++      font-size: 12px;
++      color: #7a3b12;
++      background: #fff7ec;
++      border-radius: 12px;
++      padding: 12px;
++      line-height: 1.6;
++    }
++  </style>
++</head>
++<body>
++  <div class="phone" id="my-tasks-screen">
++    <p class="eyebrow">نهر الجزيرة والشركات التابعة لها</p>
++    <h1 class="brand">ثابوت</h1>
++    <p class="subtitle">الموظف الذكي رقم ٣</p>
++    <section class="card" aria-label="مهامي">
++      <h2>مهامي</h2>
++      <p class="muted">سارة · خبزي الخالي</p>
++      <div class="task">
++        <h3>إعداد جدول إنتاج الأسبوع</h3>
++        <p>الموعد: 19 / 11 / 2026</p>
++        <p class="ref">مرجع القرار: M-001 / D-01</p>
++      </div>
++    </section>
++    <p class="note">معاينة بصرية مطابقة لمحتوى شاشة «مهامي» المحلية. ليست لقطة محاكي آيفون؛ بيئة السحابة الحالية Linux بلا Xcode/Simulator.</p>
++  </div>
++</body>
++</html>
+diff --git a/scripts/mint_local_mobile_session.py b/scripts/mint_local_mobile_session.py
+new file mode 100755
+index 0000000..dd6bda3
+--- /dev/null
++++ b/scripts/mint_local_mobile_session.py
+@@ -0,0 +1,105 @@
++#!/usr/bin/env python3
++"""Mint a short-lived local JWT for the «مهامي» Sarah session (loopback only)."""
++from __future__ import annotations
++
++import argparse
++import json
++import os
++from datetime import datetime, timedelta, timezone
++from pathlib import Path
++
++from cryptography.hazmat.primitives import serialization
++from cryptography.hazmat.primitives.asymmetric import rsa
++import jwt
++
++ROOT = Path(__file__).resolve().parents[1]
++KEYS = ROOT / "work" / "local-mobile-keys"
++PRIVATE = KEYS / "jwt_private.pem"
++PUBLIC = KEYS / "jwt_public.pem"
++
++ISSUER = "https://identity.local.thabot.test"
++AUDIENCE = "thabot-mobile-local"
++
++
++def ensure_keys() -> tuple[str, str]:
++    KEYS.mkdir(parents=True, exist_ok=True)
++    if not PRIVATE.exists() or not PUBLIC.exists():
++        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
++        PRIVATE.write_bytes(
++            key.private_bytes(
++                serialization.Encoding.PEM,
++                serialization.PrivateFormat.PKCS8,
++                serialization.NoEncryption(),
++            )
++        )
++        PUBLIC.write_bytes(
++            key.public_key().public_bytes(
++                serialization.Encoding.PEM,
++                serialization.PublicFormat.SubjectPublicKeyInfo,
++            )
++        )
++    return PRIVATE.read_text(), PUBLIC.read_text()
++
++
++def mint(who: str, minutes: int) -> dict:
++    private_pem, public_pem = ensure_keys()
++    directory = {
++        "sarah": {"sub": "sarah_khubzi", "role": "employee", "company_id": "khubzi"},
++        "omar": {"sub": "omar_khubzi", "role": "employee", "company_id": "khubzi"},
++        "nouf": {"sub": "nouf_gf", "role": "employee", "company_id": "gf"},
++    }
++    if who not in directory:
++        raise SystemExit(f"unknown who={who}; expected one of {sorted(directory)}")
++    now = datetime.now(timezone.utc)
++    claims = {
++        **directory[who],
++        "iss": ISSUER,
++        "aud": AUDIENCE,
++        "iat": now,
++        "exp": now + timedelta(minutes=minutes),
++    }
++    token = jwt.encode(claims, private_pem, algorithm="RS256")
++    expires_at_ms = int((now + timedelta(minutes=minutes)).timestamp() * 1000)
++    return {
++        "accessToken": token,
++        "expiresAt": expires_at_ms,
++        "claims": {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in claims.items()},
++        "env": {
++            "APP_ENV": "development",
++            "JWT_ISSUER": ISSUER,
++            "JWT_AUDIENCE": AUDIENCE,
++            "JWT_PUBLIC_KEY": public_pem,
++            "EXPO_PUBLIC_THABOT_LOCAL_ACCESS_TOKEN": token,
++            "EXPO_PUBLIC_THABOT_LOCAL_EXPIRES_AT": str(expires_at_ms),
++            "EXPO_PUBLIC_THABOT_API_ORIGIN": os.environ.get("EXPO_PUBLIC_THABOT_API_ORIGIN", "http://127.0.0.1:8001"),
++        },
++    }
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--who", default="sarah", choices=["sarah", "omar", "nouf"])
++    parser.add_argument("--minutes", type=int, default=60)
++    parser.add_argument("--write-env", type=Path, default=None)
++    args = parser.parse_args()
++    payload = mint(args.who, args.minutes)
++    if args.write_env:
++        lines = [f"{key}={json.dumps(value) if isinstance(value, str) and chr(10) in value else value}"
++                 for key, value in payload["env"].items()]
++        # Multiline PEM needs special handling for dotenv consumers: write a companion public key file.
++        public_path = KEYS / "jwt_public.pem"
++        env_lines = [
++            f"APP_ENV=development",
++            f"JWT_ISSUER={ISSUER}",
++            f"JWT_AUDIENCE={AUDIENCE}",
++            f"JWT_PUBLIC_KEY_FILE={public_path}",
++            f"EXPO_PUBLIC_THABOT_LOCAL_ACCESS_TOKEN={payload['accessToken']}",
++            f"EXPO_PUBLIC_THABOT_LOCAL_EXPIRES_AT={payload['expiresAt']}",
++            f"EXPO_PUBLIC_THABOT_API_ORIGIN={payload['env']['EXPO_PUBLIC_THABOT_API_ORIGIN']}",
++        ]
++        args.write_env.write_text("\n".join(env_lines) + "\n")
++    print(json.dumps({"accessToken": payload["accessToken"], "expiresAt": payload["expiresAt"], "claims": payload["claims"]}, ensure_ascii=False, indent=2))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/run_local_my_tasks_api.sh b/scripts/run_local_my_tasks_api.sh
+new file mode 100755
+index 0000000..e60c8f2
+--- /dev/null
++++ b/scripts/run_local_my_tasks_api.sh
+@@ -0,0 +1,12 @@
++#!/usr/bin/env bash
++# Start the Thabot API on loopback with the local «مهامي» JWT keys.
++set -euo pipefail
++ROOT="$(cd "$(dirname "$0")/.." && pwd)"
++cd "$ROOT"
++python3 scripts/mint_local_mobile_session.py --who sarah --minutes 120 --write-env work/local-mobile.env >/tmp/thabot-local-session.json
++export APP_ENV=development
++export JWT_ISSUER=https://identity.local.thabot.test
++export JWT_AUDIENCE=thabot-mobile-local
++export JWT_PUBLIC_KEY="$(cat work/local-mobile-keys/jwt_public.pem)"
++export PYTHONPATH=api
++exec python3 -m uvicorn app.main:app --host 127.0.0.1 --port "${PORT:-8001}"
