@@ -1,0 +1,11 @@
+gha-creds-*.json
+*.json
+.env
+.env.*
+.git
+.github
+__pycache__/
+*.pyc
+.venv/
+venv/
+tests/
